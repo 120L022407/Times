@@ -3,8 +3,12 @@ train_epochs=${TRAIN_EPOCHS:-10}
 batch_size=${BATCH_SIZE:-16}
 patience=${PATIENCE:-3}
 num_workers=${NUM_WORKERS:-4}
+log_dir=${LOG_DIR:-./logs}
+log_file=${LOG_FILE:-$log_dir/etth1_pchip15_patchtst_ms_384_384.log}
 
-python -u run.py \
+mkdir -p "$log_dir"
+
+nohup python -u run.py \
   --task_name long_term_forecast \
   --is_training 1 \
   --model_id ETTh1_PCHIP15_384_384 \
@@ -35,4 +39,8 @@ python -u run.py \
   --n_heads 4 \
   --d_model 128 \
   --d_ff 256 \
-  --des 'Exp'
+  --des 'Exp' > "$log_file" 2>&1 &
+
+echo "Started $model_name training in background."
+echo "PID: $!"
+echo "Log: $log_file"
