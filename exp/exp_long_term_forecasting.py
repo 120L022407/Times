@@ -5,6 +5,7 @@ from utils.metrics import metric
 import torch
 import torch.nn as nn
 from torch import optim
+import json
 import os
 import time
 import warnings
@@ -38,38 +39,106 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         criterion = nn.MSELoss()
         return criterion
  
+    def _unpack_batch(self, batch):
+        if len(batch) == 4:
+            batch_x, batch_y, batch_x_mark, batch_y_mark = batch
+            return batch_x, batch_y, batch_x_mark, batch_y_mark, None
+        if len(batch) == 5:
+            batch_x, batch_y, batch_x_mark, batch_y_mark, observation_mask = batch
+            return batch_x, batch_y, batch_x_mark, batch_y_mark, observation_mask
+        raise ValueError(f"Expected batch with 4 or 5 items, got {len(batch)} items.")
+
+    def _call_model(self, batch_x, batch_y, batch_x_mark, batch_y_mark):
+        dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
+        dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+        if self.args.use_amp:
+            with torch.cuda.amp.autocast():
+                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+        else:
+            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+        return outputs
+
+    def _forecast_feature_slice(self, tensor):
+        f_dim = -1 if self.args.features == 'MS' else 0
+        return tensor[:, -self.args.pred_len:, f_dim:]
+
+    def _resolve_eval_observation_mask(self, observation_mask):
+        if self.args.eval_mask_mode == 'all':
+            return None
+        if self.args.eval_mask_mode == 'observed':
+            if observation_mask is None:
+                raise ValueError("eval_mask_mode='observed' requires observation_mask in every evaluation batch.")
+            return observation_mask
+        if self.args.eval_mask_mode == 'auto':
+            return observation_mask
+        raise ValueError(f"Unsupported eval_mask_mode: {self.args.eval_mask_mode}")
+
+    def _prepare_eval_mask(self, observation_mask, target_tensor):
+        if observation_mask is None:
+            return None, None, None
+
+        mask = observation_mask.to(self.device)
+        if mask.dtype != torch.bool:
+            mask = mask != 0
+
+        try:
+            broadcast_mask = torch.broadcast_to(mask, target_tensor.shape)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"Observation mask with shape {tuple(mask.shape)} cannot broadcast to target shape {tuple(target_tensor.shape)}."
+            ) from exc
+
+        observed_time_count = int(mask.any(dim=-1).sum().item()) if mask.ndim >= 3 else int(mask.sum().item())
+        evaluated_value_count = int(broadcast_mask.sum().item())
+        if evaluated_value_count == 0:
+            raise ValueError("Observation mask has zero valid evaluation points.")
+
+        return broadcast_mask, observed_time_count, evaluated_value_count
 
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
+        squared_error_sum = 0.0
+        valid_value_count = 0
+        using_mask_eval = None
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
+            for i, batch in enumerate(vali_loader):
+                batch_x, batch_y, batch_x_mark, batch_y_mark, observation_mask = self._unpack_batch(batch)
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float()
+                batch_y = batch_y.float().to(self.device)
 
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-                # encoder - decoder
-                if self.args.use_amp:
-                    with torch.cuda.amp.autocast():
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                outputs = self._call_model(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                outputs = self._forecast_feature_slice(outputs)
+                batch_y = self._forecast_feature_slice(batch_y)
 
                 pred = outputs.detach()
                 true = batch_y.detach()
 
-                loss = criterion(pred, true)
+                eval_mask = self._resolve_eval_observation_mask(observation_mask)
+                batch_uses_mask = eval_mask is not None
+                if using_mask_eval is None:
+                    using_mask_eval = batch_uses_mask
+                elif using_mask_eval != batch_uses_mask:
+                    raise ValueError("Mixed masked and unmasked batches are not supported in a single validation loader.")
 
-                total_loss.append(loss.item())
-        total_loss = np.average(total_loss)
+                if not batch_uses_mask:
+                    loss = criterion(pred, true)
+                    total_loss.append(loss.item())
+                    continue
+
+                eval_mask, _, batch_value_count = self._prepare_eval_mask(eval_mask, pred)
+                squared_error_sum += torch.sum((pred - true)[eval_mask] ** 2).item()
+                valid_value_count += batch_value_count
+
+        if using_mask_eval:
+            if valid_value_count == 0:
+                raise ValueError("Observation mask has zero valid evaluation points across the validation set.")
+            total_loss = squared_error_sum / valid_value_count
+        else:
+            total_loss = np.average(total_loss)
         self.model.train()
         return total_loss
 
@@ -99,7 +168,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
             self.model.train()
             epoch_time = time.time()
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+            for i, batch in enumerate(train_loader):
+                batch_x, batch_y, batch_x_mark, batch_y_mark, _ = self._unpack_batch(batch)
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -107,26 +177,17 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-
-                # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
-                        f_dim = -1 if self.args.features == 'MS' else 0
-                        outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                        outputs = self._call_model(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                        outputs = self._forecast_feature_slice(outputs)
+                        batch_y = self._forecast_feature_slice(batch_y)
                         loss = criterion(outputs, batch_y)
                         train_loss.append(loss.item())
                 else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
-                    f_dim = -1 if self.args.features == 'MS' else 0
-                    outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                    batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                    outputs = self._call_model(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                    outputs = self._forecast_feature_slice(outputs)
+                    batch_y = self._forecast_feature_slice(batch_y)
                     loss = criterion(outputs, batch_y)
                     train_loss.append(loss.item())
 
@@ -178,25 +239,21 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             os.makedirs(folder_path)
 
         self.model.eval()
+        raw_observed_masks = []
+        eval_observed_masks = []
+        using_mask_eval = None
+        observed_time_count = None
+        evaluated_value_count = None
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
+            for i, batch in enumerate(test_loader):
+                batch_x, batch_y, batch_x_mark, batch_y_mark, observation_mask = self._unpack_batch(batch)
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-                # encoder - decoder
-                if self.args.use_amp:
-                    with torch.cuda.amp.autocast():
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
-                f_dim = -1 if self.args.features == 'MS' else 0
+                outputs = self._call_model(batch_x, batch_y, batch_x_mark, batch_y_mark)
                 outputs = outputs[:, -self.args.pred_len:, :]
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
                 outputs = outputs.detach().cpu().numpy()
@@ -208,11 +265,29 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     outputs = test_data.inverse_transform(outputs.reshape(shape[0] * shape[1], -1)).reshape(shape)
                     batch_y = test_data.inverse_transform(batch_y.reshape(shape[0] * shape[1], -1)).reshape(shape)
 
-                outputs = outputs[:, :, f_dim:]
-                batch_y = batch_y[:, :, f_dim:]
+                outputs = self._forecast_feature_slice(outputs)
+                batch_y = self._forecast_feature_slice(batch_y)
 
                 pred = outputs
                 true = batch_y
+
+                eval_mask = self._resolve_eval_observation_mask(observation_mask)
+                batch_uses_mask = eval_mask is not None
+                if using_mask_eval is None:
+                    using_mask_eval = batch_uses_mask
+                elif using_mask_eval != batch_uses_mask:
+                    raise ValueError("Mixed masked and unmasked batches are not supported in a single test loader.")
+
+                if observation_mask is not None:
+                    raw_observed_masks.append(observation_mask.detach().cpu().numpy())
+
+                if batch_uses_mask:
+                    eval_mask, batch_observed_time_count, batch_evaluated_value_count = self._prepare_eval_mask(
+                        eval_mask, torch.from_numpy(pred).to(self.device)
+                    )
+                    observed_time_count = (observed_time_count or 0) + batch_observed_time_count
+                    evaluated_value_count = (evaluated_value_count or 0) + batch_evaluated_value_count
+                    eval_observed_masks.append(eval_mask.detach().cpu().numpy())
 
                 preds.append(pred)
                 trues.append(true)
@@ -252,11 +327,17 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         else:
             dtw = 'Not calculated'
 
-        mae, mse, rmse, mape, mspe = metric(preds, trues)
-        print('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
+        metric_mask = None
+        evaluation_scope = 'all-points'
+        if using_mask_eval:
+            metric_mask = np.concatenate(eval_observed_masks, axis=0)
+            evaluation_scope = 'observed-only'
+
+        mae, mse, rmse, mape, mspe = metric(preds, trues, mask=metric_mask)
+        print('evaluation_scope:{}, mse:{}, mae:{}, dtw:{}'.format(evaluation_scope, mse, mae, dtw))
         f = open("result_long_term_forecast.txt", 'a')
         f.write(setting + "  \n")
-        f.write('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
+        f.write('evaluation_scope:{}, mse:{}, mae:{}, dtw:{}'.format(evaluation_scope, mse, mae, dtw))
         f.write('\n')
         f.write('\n')
         f.close()
@@ -264,5 +345,25 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
         np.save(folder_path + 'pred.npy', preds)
         np.save(folder_path + 'true.npy', trues)
+        if raw_observed_masks:
+            observed_masks = np.concatenate(raw_observed_masks, axis=0)
+            np.save(folder_path + 'observed_mask.npy', observed_masks)
+            if observed_time_count is None:
+                observed_time_count = int(observed_masks.astype(bool).any(axis=-1).sum())
+            if evaluated_value_count is None:
+                evaluated_value_count = int(preds.size)
+
+            metrics_real_only = {
+                'evaluation_scope': evaluation_scope,
+                'mae': float(mae),
+                'mse': float(mse),
+                'rmse': float(rmse),
+                'mape': float(mape),
+                'mspe': float(mspe),
+                'observed_time_count': int(observed_time_count),
+                'evaluated_value_count': int(evaluated_value_count),
+            }
+            with open(folder_path + 'metrics_real_only.json', 'w') as handle:
+                json.dump(metrics_real_only, handle, indent=2, sort_keys=True)
 
         return

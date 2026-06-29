@@ -42,6 +42,16 @@ class Model(nn.Module):
         self.task_name = configs.task_name
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
+        patch_len = getattr(configs, 'patch_len', patch_len)
+        stride = getattr(configs, 'stride', stride)
+        if patch_len <= 0:
+            raise ValueError(f"patch_len must be > 0, got {patch_len}.")
+        if stride <= 0:
+            raise ValueError(f"stride must be > 0, got {stride}.")
+        if patch_len > self.seq_len:
+            raise ValueError(
+                f"patch_len must be <= seq_len for PatchTST, got patch_len={patch_len}, seq_len={self.seq_len}."
+            )
         padding = stride
 
         # patching and embedding

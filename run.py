@@ -112,6 +112,13 @@ if __name__ == '__main__':
     # metrics (dtw)
     parser.add_argument('--use_dtw', action='store_true', default=False,
                         help='enable dtw metric (time consuming; default: off)')
+    parser.add_argument(
+        '--eval_mask_mode',
+        type=str,
+        choices=['auto', 'all', 'observed'],
+        default='auto',
+        help='evaluation mask mode for long-term forecasting: auto uses batch mask when available, all ignores it, observed requires it',
+    )
 
     # Augmentation
     parser.add_argument('--augmentation_ratio', type=int, default=0, help="How many times to augment")
@@ -139,6 +146,7 @@ if __name__ == '__main__':
 
     # TimeXer
     parser.add_argument('--patch_len', type=int, default=16, help='patch length')
+    parser.add_argument('--stride', type=int, default=8, help='patch stride')
 
     # GCN
     parser.add_argument('--node_dim', type=int, default=10, help='each node embbed to dim dimentions')
