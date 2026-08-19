@@ -1,11 +1,11 @@
-model_name=PatchTST
+model_name=TimeMixer
 train_epochs=${TRAIN_EPOCHS:-10}
 batch_size=${BATCH_SIZE:-16}
-patience=${PATIENCE:-3}
+patience=${PATIENCE:-10}
 num_workers=${NUM_WORKERS:-4}
 gpu=${GPU:-0}
 log_dir=${LOG_DIR:-./logs}
-log_file=${LOG_FILE:-$log_dir/etth1_pchip15_patchtst_ms_384_384.log}
+log_file=${LOG_FILE:-$log_dir/etth1_pchip15_timemixer_ms_384_384.log}
 
 mkdir -p "$log_dir"
 
@@ -21,25 +21,25 @@ nohup python -u run.py \
   --target OT \
   --freq t \
   --seq_len 384 \
-  --label_len 192 \
+  --label_len 0 \
   --pred_len 384 \
   --enc_in 7 \
   --dec_in 7 \
-  --c_out 1 \
+  --c_out 7 \
   --eval_mask_mode observed \
   --batch_size $batch_size \
-  --learning_rate 0.0001 \
+  --learning_rate 0.01 \
   --train_epochs $train_epochs \
   --patience $patience \
   --num_workers $num_workers \
   --gpu $gpu \
   --itr 1 \
-  --patch_len 64 \
-  --stride 32 \
-  --e_layers 3 \
-  --n_heads 4 \
-  --d_model 128 \
-  --d_ff 256 \
+  --e_layers 2 \
+  --d_model 16 \
+  --d_ff 32 \
+  --down_sampling_layers 3 \
+  --down_sampling_method avg \
+  --down_sampling_window 2 \
   --des 'Exp' > "$log_file" 2>&1 &
 
 echo "Started $model_name training in background."
