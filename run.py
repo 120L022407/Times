@@ -148,6 +148,28 @@ if __name__ == '__main__':
     parser.add_argument('--patch_len', type=int, default=16, help='patch length')
     parser.add_argument('--stride', type=int, default=8, help='patch stride')
 
+    # TFPS
+    parser.add_argument('--tfps_t_num_experts', type=int, default=8,
+                        help='number of time-domain pattern experts')
+    parser.add_argument('--tfps_t_top_k', type=int, default=1,
+                        help='number of selected time-domain experts')
+    parser.add_argument('--tfps_f_num_experts', type=int, default=8,
+                        help='number of frequency-domain pattern experts')
+    parser.add_argument('--tfps_f_top_k', type=int, default=1,
+                        help='number of selected frequency-domain experts')
+    parser.add_argument('--tfps_subspace_dim', type=int, default=0,
+                        help='PI subspace rank; 0 uses enc_in*d_model/num_experts')
+    parser.add_argument('--tfps_expert_hidden', type=int, default=0,
+                        help='expert MLP hidden size; 0 uses 4*enc_in*d_model')
+    parser.add_argument('--tfps_eta', type=float, default=5.0,
+                        help='subspace affinity smoothing')
+    parser.add_argument('--tfps_beta', type=float, default=0.1,
+                        help='KL weight in the pattern identifier loss')
+    parser.add_argument('--tfps_time_loss_weight', type=float, default=1.0,
+                        help='time-domain pattern identifier loss weight')
+    parser.add_argument('--tfps_frequency_loss_weight', type=float, default=1.0,
+                        help='frequency-domain pattern identifier loss weight')
+
     # GCN
     parser.add_argument('--node_dim', type=int, default=10, help='each node embbed to dim dimentions')
     parser.add_argument('--gcn_depth', type=int, default=2, help='')

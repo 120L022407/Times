@@ -38,6 +38,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _select_criterion(self):
         criterion = nn.MSELoss()
         return criterion
+
+    def _add_model_auxiliary_loss(self, loss):
+        model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        auxiliary_loss_fn = getattr(model, 'auxiliary_loss', None)
+        if auxiliary_loss_fn is None:
+            return loss
+        auxiliary_loss = auxiliary_loss_fn()
+        if not torch.is_tensor(auxiliary_loss) or auxiliary_loss.ndim != 0:
+            raise ValueError('Model auxiliary_loss() must return a scalar tensor.')
+        return loss + auxiliary_loss
  
     def _unpack_batch(self, batch):
         if len(batch) == 4:
@@ -182,13 +192,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         outputs = self._call_model(batch_x, batch_y, batch_x_mark, batch_y_mark)
                         outputs = self._forecast_feature_slice(outputs)
                         batch_y = self._forecast_feature_slice(batch_y)
-                        loss = criterion(outputs, batch_y)
+                        loss = self._add_model_auxiliary_loss(criterion(outputs, batch_y))
                         train_loss.append(loss.item())
                 else:
                     outputs = self._call_model(batch_x, batch_y, batch_x_mark, batch_y_mark)
                     outputs = self._forecast_feature_slice(outputs)
                     batch_y = self._forecast_feature_slice(batch_y)
-                    loss = criterion(outputs, batch_y)
+                    loss = self._add_model_auxiliary_loss(criterion(outputs, batch_y))
                     train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
