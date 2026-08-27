@@ -133,6 +133,15 @@ class RecordingMSELoss(nn.Module):
         return loss
 
 
+class ProgressRecordingLoss(RecordingMSELoss):
+    def __init__(self):
+        super().__init__()
+        self.progress = []
+
+    def set_progress(self, current_step, total_steps):
+        self.progress.append((current_step, total_steps))
+
+
 class CheckpointingEarlyStopping:
     def __init__(self, *args, **kwargs):
         self.early_stop = False
@@ -240,6 +249,33 @@ def test_train_loss_uses_all_points_even_when_mask_exists(tmp_path, monkeypatch)
     exp.train("masked-train-uses-all-points")
 
     assert criterion.last_loss == pytest.approx(2500.0, rel=1e-6, abs=1e-6)
+
+
+def test_train_updates_loss_progress_and_uses_mse_for_evaluation(tmp_path, monkeypatch):
+    args = _make_args(train_epochs=2, checkpoints=str(tmp_path / "checkpoints"))
+    exp = _make_exp(args=args, model=ConstantForecastModel(output_channels=1, bias_init=0.0))
+    criterion = ProgressRecordingLoss()
+    batch = _make_batch(future_values=[[[0.0], [1.0], [0.0], [1.0]]])
+    evaluation_criteria = []
+
+    exp._get_data = lambda flag: (_make_test_data(), [batch])
+    exp._select_optimizer = lambda: torch.optim.SGD(exp.model.parameters(), lr=0.0)
+    exp._select_criterion = lambda: criterion
+
+    def record_validation_criterion(data, loader, evaluation_criterion):
+        del data, loader
+        evaluation_criteria.append(evaluation_criterion)
+        return 0.0
+
+    exp.vali = record_validation_criterion
+    monkeypatch.setattr(exp_module, "EarlyStopping", CheckpointingEarlyStopping)
+    monkeypatch.setattr(exp_module, "adjust_learning_rate", lambda *args, **kwargs: None)
+
+    exp.train("facl-progress-and-mse-evaluation")
+
+    assert criterion.progress == [(0, 2), (1, 2)]
+    assert len(evaluation_criteria) == 4
+    assert all(isinstance(item, nn.MSELoss) for item in evaluation_criteria)
 
 
 def test_validation_ignores_large_errors_where_mask_is_zero():

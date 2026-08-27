@@ -92,7 +92,15 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=3, help='early stopping patience')
     parser.add_argument('--learning_rate', type=float, default=0.0001, help='optimizer learning rate')
     parser.add_argument('--des', type=str, default='test', help='exp description')
-    parser.add_argument('--loss', type=str, default='MSE', help='loss function')
+    parser.add_argument('--loss', type=str, default='MSE', help='loss function; long-term options: mse, fal, fcl, facl, ps')
+    parser.add_argument('--facl_alpha', type=float, default=0.1,
+                        help='final training ratio where FACL selects FAL with probability 1')
+    parser.add_argument('--facl_eps', type=float, default=1e-8,
+                        help='numerical stability epsilon for Fourier correlation loss')
+    parser.add_argument('--ps_lambda', type=float, default=3.0,
+                        help='weight of patch-wise structural loss added to MSE')
+    parser.add_argument('--ps_delta', type=int, default=24,
+                        help='maximum FAP patch length')
     parser.add_argument('--lradj', type=str, default='type1', help='adjust learning rate')
     parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
 

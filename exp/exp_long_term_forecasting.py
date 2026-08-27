@@ -2,6 +2,7 @@ from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
 from utils.tools import EarlyStopping, adjust_learning_rate, visual
 from utils.metrics import metric
+from utils.losses import build_forecasting_loss
 import torch
 import torch.nn as nn
 from torch import optim
@@ -36,8 +37,20 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
-        return criterion
+        return build_forecasting_loss(
+            getattr(self.args, 'loss', 'MSE'),
+            facl_alpha=getattr(self.args, 'facl_alpha', 0.1),
+            facl_eps=getattr(self.args, 'facl_eps', 1e-8),
+            model=self.model,
+            ps_lambda=getattr(self.args, 'ps_lambda', 3.0),
+            ps_delta=getattr(self.args, 'ps_delta', 24),
+        )
+
+    @staticmethod
+    def _set_criterion_progress(criterion, current_step, total_steps):
+        set_progress = getattr(criterion, 'set_progress', None)
+        if set_progress is not None:
+            set_progress(current_step, total_steps)
 
     def _add_model_auxiliary_loss(self, loss):
         model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
@@ -168,6 +181,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
+        eval_criterion = nn.MSELoss()
+        total_training_steps = max(train_steps * self.args.train_epochs, 1)
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
@@ -180,6 +195,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             epoch_time = time.time()
             for i, batch in enumerate(train_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark, _ = self._unpack_batch(batch)
+                self._set_criterion_progress(
+                    criterion,
+                    current_step=epoch * train_steps + i,
+                    total_steps=total_training_steps,
+                )
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -219,8 +239,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
-            vali_loss = self.vali(vali_data, vali_loader, criterion)
-            test_loss = self.vali(test_data, test_loader, criterion)
+            vali_loss = self.vali(vali_data, vali_loader, eval_criterion)
+            test_loss = self.vali(test_data, test_loader, eval_criterion)
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
