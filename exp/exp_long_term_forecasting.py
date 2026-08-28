@@ -52,8 +52,44 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         if set_progress is not None:
             set_progress(current_step, total_steps)
 
+    @staticmethod
+    def _base_model(model):
+        return model.module if isinstance(model, nn.DataParallel) else model
+
+    def _fit_model_auxiliary_state(self, train_loader):
+        model = self._base_model(self.model)
+        begin_fit = getattr(model, 'begin_auxiliary_fit', None)
+        if begin_fit is None or not begin_fit():
+            return
+        update_fit = getattr(model, 'update_auxiliary_fit', None)
+        finalize_fit = getattr(model, 'finalize_auxiliary_fit', None)
+        if update_fit is None or finalize_fit is None:
+            raise ValueError('Auxiliary fitting requires begin, update, and finalize methods.')
+        for batch in train_loader:
+            _, batch_y, _, _, _ = self._unpack_batch(batch)
+            update_fit(self._forecast_feature_slice(batch_y))
+        finalize_fit()
+
+    def _set_model_training_progress(self, current_step, total_steps):
+        model = self._base_model(self.model)
+        set_progress = getattr(model, 'set_training_progress', None)
+        if set_progress is not None:
+            set_progress(current_step, total_steps)
+
+    def _set_model_auxiliary_targets(self, targets):
+        model = self._base_model(self.model)
+        set_targets = getattr(model, 'set_auxiliary_targets', None)
+        if set_targets is not None:
+            set_targets(targets)
+
     def _add_model_auxiliary_loss(self, loss):
-        model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        model = self._base_model(self.model)
+        compose_loss = getattr(model, 'compose_training_loss', None)
+        if compose_loss is not None:
+            composed_loss = compose_loss(loss)
+            if not torch.is_tensor(composed_loss) or composed_loss.ndim != 0:
+                raise ValueError('Model compose_training_loss() must return a scalar tensor.')
+            return composed_loss
         auxiliary_loss_fn = getattr(model, 'auxiliary_loss', None)
         if auxiliary_loss_fn is None:
             return loss
@@ -167,6 +203,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
     def train(self, setting):
         train_data, train_loader = self._get_data(flag='train')
+        self._fit_model_auxiliary_state(train_loader)
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
 
@@ -200,6 +237,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     current_step=epoch * train_steps + i,
                     total_steps=total_training_steps,
                 )
+                self._set_model_training_progress(
+                    current_step=epoch * train_steps + i,
+                    total_steps=total_training_steps,
+                )
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -212,12 +253,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         outputs = self._call_model(batch_x, batch_y, batch_x_mark, batch_y_mark)
                         outputs = self._forecast_feature_slice(outputs)
                         batch_y = self._forecast_feature_slice(batch_y)
+                        self._set_model_auxiliary_targets(batch_y)
                         loss = self._add_model_auxiliary_loss(criterion(outputs, batch_y))
                         train_loss.append(loss.item())
                 else:
                     outputs = self._call_model(batch_x, batch_y, batch_x_mark, batch_y_mark)
                     outputs = self._forecast_feature_slice(outputs)
                     batch_y = self._forecast_feature_slice(batch_y)
+                    self._set_model_auxiliary_targets(batch_y)
                     loss = self._add_model_auxiliary_loss(criterion(outputs, batch_y))
                     train_loss.append(loss.item())
 

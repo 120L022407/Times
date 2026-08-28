@@ -156,6 +156,16 @@ if __name__ == '__main__':
     parser.add_argument('--patch_len', type=int, default=16, help='patch length')
     parser.add_argument('--stride', type=int, default=8, help='patch stride')
 
+    # HCAN
+    parser.add_argument('--hcan_kc', type=int, default=2, help='number of coarse HCAN classes')
+    parser.add_argument('--hcan_kf', type=int, default=4, help='number of fine HCAN classes')
+    parser.add_argument('--hcan_hidden_dim', type=int, default=512, help='HCAN hierarchy feature size')
+    parser.add_argument('--hcan_alpha', type=float, default=1.0, help='relative regression weight in L_HIER')
+    parser.add_argument('--hcan_beta', type=float, default=1.0, help='hierarchical consistency loss weight')
+    parser.add_argument('--hcan_gamma', type=float, default=1.0, help='forecast MSE weight')
+    parser.add_argument('--hcan_annealing_steps', type=int, default=10,
+                        help='steps used to anneal the UAC Dirichlet KL term')
+
     # TFPS
     parser.add_argument('--tfps_t_num_experts', type=int, default=8,
                         help='number of time-domain pattern experts')
